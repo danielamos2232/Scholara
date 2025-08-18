@@ -14,6 +14,15 @@
 (define-constant ERR_INVALID_ACHIEVEMENT_TYPE (err u112))
 (define-constant ERR_REWARD_NOT_AVAILABLE (err u113))
 (define-constant ERR_INVALID_TIER_REQUIREMENTS (err u114))
+(define-constant ERR_MENTOR_NOT_FOUND (err u115))
+(define-constant ERR_MENTORSHIP_REQUEST_NOT_FOUND (err u116))
+(define-constant ERR_MENTORSHIP_NOT_FOUND (err u117))
+(define-constant ERR_ALREADY_MENTOR (err u118))
+(define-constant ERR_NOT_QUALIFIED_MENTOR (err u119))
+(define-constant ERR_MENTORSHIP_NOT_ACTIVE (err u120))
+(define-constant ERR_INVALID_SESSION_DURATION (err u121))
+(define-constant ERR_MENTORSHIP_ALREADY_EXISTS (err u122))
+(define-constant ERR_INVALID_RATING_VALUE (err u123))
 
 (define-data-var proposal-counter uint u0)
 (define-data-var min-proposal-amount uint u1000000)
@@ -21,6 +30,8 @@
 (define-data-var min-votes-required uint u3)
 (define-data-var achievement-counter uint u0)
 (define-data-var reward-counter uint u0)
+(define-data-var mentorship-request-counter uint u0)
+(define-data-var mentorship-counter uint u0)
 
 (define-map proposals
   uint
@@ -109,6 +120,79 @@
     token-value: uint,
     tier-multiplier: uint,
     active: bool
+  }
+)
+
+(define-map mentor-profiles
+  principal
+  {
+    name: (string-ascii 100),
+    expertise-areas: (string-ascii 300),
+    experience-years: uint,
+    education-background: (string-ascii 200),
+    max-students: uint,
+    current-students: uint,
+    total-sessions: uint,
+    average-rating: uint,
+    total-ratings: uint,
+    tokens-earned: uint,
+    active: bool,
+    registered-at: uint
+  }
+)
+
+(define-map mentorship-requests
+  uint
+  {
+    student: principal,
+    subject-area: (string-ascii 100),
+    description: (string-ascii 300),
+    preferred-schedule: (string-ascii 100),
+    duration-weeks: uint,
+    status: (string-ascii 20),
+    created-at: uint,
+    matched-mentor: (optional principal)
+  }
+)
+
+(define-map active-mentorships
+  uint
+  {
+    mentor: principal,
+    student: principal,
+    subject-area: (string-ascii 100),
+    start-date: uint,
+    planned-duration: uint,
+    sessions-completed: uint,
+    total-hours: uint,
+    student-progress: uint,
+    mentor-notes: (string-ascii 500),
+    status: (string-ascii 20),
+    request-id: uint
+  }
+)
+
+(define-map mentorship-sessions
+  {mentorship-id: uint, session-number: uint}
+  {
+    date: uint,
+    duration-minutes: uint,
+    topics-covered: (string-ascii 200),
+    student-progress-rating: uint,
+    session-notes: (string-ascii 300),
+    completed: bool
+  }
+)
+
+(define-map mentor-feedback
+  {mentorship-id: uint, reviewer: principal}
+  {
+    rating: uint,
+    communication-score: uint,
+    knowledge-score: uint,
+    helpfulness-score: uint,
+    feedback-text: (string-ascii 300),
+    submitted-at: uint
   }
 )
 
@@ -476,3 +560,232 @@
 
 (define-read-only (get-reward-counter)
   (var-get reward-counter))
+
+(define-public (register-as-mentor
+  (name (string-ascii 100))
+  (expertise-areas (string-ascii 300))
+  (experience-years uint)
+  (education-background (string-ascii 200))
+  (max-students uint))
+  (let ((contributor-amount (default-to u0 (map-get? member-contributions tx-sender))))
+    (asserts! (> contributor-amount u1000000) ERR_NOT_QUALIFIED_MENTOR)
+    (asserts! (> max-students u0) ERR_INVALID_AMOUNT)
+    (asserts! (is-none (map-get? mentor-profiles tx-sender)) ERR_ALREADY_MENTOR)
+    
+    (map-set mentor-profiles
+      tx-sender
+      {
+        name: name,
+        expertise-areas: expertise-areas,
+        experience-years: experience-years,
+        education-background: education-background,
+        max-students: max-students,
+        current-students: u0,
+        total-sessions: u0,
+        average-rating: u0,
+        total-ratings: u0,
+        tokens-earned: u0,
+        active: true,
+        registered-at: stacks-block-height
+      })
+    (ok true)))
+
+(define-public (request-mentorship
+  (subject-area (string-ascii 100))
+  (description (string-ascii 300))
+  (preferred-schedule (string-ascii 100))
+  (duration-weeks uint))
+  (let ((request-id (+ (var-get mentorship-request-counter) u1)))
+    (asserts! (> duration-weeks u0) ERR_INVALID_AMOUNT)
+    (asserts! (<= duration-weeks u52) ERR_INVALID_AMOUNT)
+    (asserts! (is-some (map-get? student-applications tx-sender)) ERR_NOT_AUTHORIZED)
+    
+    (map-set mentorship-requests
+      request-id
+      {
+        student: tx-sender,
+        subject-area: subject-area,
+        description: description,
+        preferred-schedule: preferred-schedule,
+        duration-weeks: duration-weeks,
+        status: "pending",
+        created-at: stacks-block-height,
+        matched-mentor: none
+      })
+    (var-set mentorship-request-counter request-id)
+    (ok request-id)))
+
+(define-public (accept-mentorship-request (request-id uint))
+  (let ((request (unwrap! (map-get? mentorship-requests request-id) ERR_MENTORSHIP_REQUEST_NOT_FOUND))
+        (mentor-profile (unwrap! (map-get? mentor-profiles tx-sender) ERR_MENTOR_NOT_FOUND))
+        (mentorship-id (+ (var-get mentorship-counter) u1)))
+    (asserts! (get active mentor-profile) ERR_NOT_QUALIFIED_MENTOR)
+    (asserts! (is-eq (get status request) "pending") ERR_MENTORSHIP_REQUEST_NOT_FOUND)
+    (asserts! (< (get current-students mentor-profile) (get max-students mentor-profile)) ERR_NOT_QUALIFIED_MENTOR)
+    
+    (map-set mentorship-requests
+      request-id
+      (merge request {status: "matched", matched-mentor: (some tx-sender)}))
+    
+    (map-set active-mentorships
+      mentorship-id
+      {
+        mentor: tx-sender,
+        student: (get student request),
+        subject-area: (get subject-area request),
+        start-date: stacks-block-height,
+        planned-duration: (get duration-weeks request),
+        sessions-completed: u0,
+        total-hours: u0,
+        student-progress: u0,
+        mentor-notes: "",
+        status: "active",
+        request-id: request-id
+      })
+    
+    (map-set mentor-profiles
+      tx-sender
+      (merge mentor-profile {current-students: (+ (get current-students mentor-profile) u1)}))
+    
+    (var-set mentorship-counter mentorship-id)
+    (ok mentorship-id)))
+
+(define-public (log-mentorship-session
+  (mentorship-id uint)
+  (duration-minutes uint)
+  (topics-covered (string-ascii 200))
+  (student-progress-rating uint)
+  (session-notes (string-ascii 300)))
+  (let ((mentorship (unwrap! (map-get? active-mentorships mentorship-id) ERR_MENTORSHIP_NOT_FOUND))
+        (mentor-profile (unwrap! (map-get? mentor-profiles tx-sender) ERR_MENTOR_NOT_FOUND))
+        (session-number (+ (get sessions-completed mentorship) u1)))
+    (asserts! (is-eq (get mentor mentorship) tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status mentorship) "active") ERR_MENTORSHIP_NOT_ACTIVE)
+    (asserts! (> duration-minutes u0) ERR_INVALID_SESSION_DURATION)
+    (asserts! (<= duration-minutes u480) ERR_INVALID_SESSION_DURATION)
+    (asserts! (<= student-progress-rating u10) ERR_INVALID_RATING_VALUE)
+    
+    (map-set mentorship-sessions
+      {mentorship-id: mentorship-id, session-number: session-number}
+      {
+        date: stacks-block-height,
+        duration-minutes: duration-minutes,
+        topics-covered: topics-covered,
+        student-progress-rating: student-progress-rating,
+        session-notes: session-notes,
+        completed: true
+      })
+    
+    (map-set active-mentorships
+      mentorship-id
+      (merge mentorship 
+        {
+          sessions-completed: session-number,
+          total-hours: (+ (get total-hours mentorship) (/ duration-minutes u60)),
+          student-progress: (/ (+ (* (get student-progress mentorship) (get sessions-completed mentorship)) student-progress-rating) session-number)
+        }))
+    
+    (map-set mentor-profiles
+      tx-sender
+      (merge mentor-profile {total-sessions: (+ (get total-sessions mentor-profile) u1)}))
+    
+    (ok session-number)))
+
+(define-public (complete-mentorship
+  (mentorship-id uint)
+  (final-notes (string-ascii 500)))
+  (let ((mentorship (unwrap! (map-get? active-mentorships mentorship-id) ERR_MENTORSHIP_NOT_FOUND))
+        (mentor-profile (unwrap! (map-get? mentor-profiles (get mentor mentorship)) ERR_MENTOR_NOT_FOUND))
+        (token-reward (* (get sessions-completed mentorship) u50)))
+    (asserts! (or (is-eq tx-sender (get mentor mentorship)) (is-eq tx-sender (get student mentorship))) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status mentorship) "active") ERR_MENTORSHIP_NOT_ACTIVE)
+    (asserts! (> (get sessions-completed mentorship) u0) ERR_INVALID_AMOUNT)
+    
+    (map-set active-mentorships
+      mentorship-id
+      (merge mentorship {status: "completed", mentor-notes: final-notes}))
+    
+    (map-set mentor-profiles
+      (get mentor mentorship)
+      (merge mentor-profile 
+        {
+          current-students: (- (get current-students mentor-profile) u1),
+          tokens-earned: (+ (get tokens-earned mentor-profile) token-reward)
+        }))
+    
+    (try! (as-contract (stx-transfer? token-reward tx-sender (get mentor mentorship))))
+    (ok token-reward)))
+
+(define-public (submit-mentor-feedback
+  (mentorship-id uint)
+  (rating uint)
+  (communication-score uint)
+  (knowledge-score uint)
+  (helpfulness-score uint)
+  (feedback-text (string-ascii 300)))
+  (let ((mentorship (unwrap! (map-get? active-mentorships mentorship-id) ERR_MENTORSHIP_NOT_FOUND))
+        (mentor-address (get mentor mentorship))
+        (mentor-profile (unwrap! (map-get? mentor-profiles mentor-address) ERR_MENTOR_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (get student mentorship)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status mentorship) "completed") ERR_MENTORSHIP_NOT_ACTIVE)
+    (asserts! (<= rating u10) ERR_INVALID_RATING_VALUE)
+    (asserts! (<= communication-score u10) ERR_INVALID_RATING_VALUE)
+    (asserts! (<= knowledge-score u10) ERR_INVALID_RATING_VALUE)
+    (asserts! (<= helpfulness-score u10) ERR_INVALID_RATING_VALUE)
+    (asserts! (is-none (map-get? mentor-feedback {mentorship-id: mentorship-id, reviewer: tx-sender})) ERR_ACHIEVEMENT_ALREADY_CLAIMED)
+    
+    (map-set mentor-feedback
+      {mentorship-id: mentorship-id, reviewer: tx-sender}
+      {
+        rating: rating,
+        communication-score: communication-score,
+        knowledge-score: knowledge-score,
+        helpfulness-score: helpfulness-score,
+        feedback-text: feedback-text,
+        submitted-at: stacks-block-height
+      })
+    
+    (let ((new-total-ratings (+ (get total-ratings mentor-profile) u1))
+          (current-total-score (* (get average-rating mentor-profile) (get total-ratings mentor-profile)))
+          (new-total-score (+ current-total-score rating))
+          (new-average (/ new-total-score new-total-ratings)))
+      (map-set mentor-profiles
+        mentor-address
+        (merge mentor-profile 
+          {
+            total-ratings: new-total-ratings,
+            average-rating: new-average
+          })))
+    (ok true)))
+
+(define-read-only (get-mentor-profile (mentor principal))
+  (map-get? mentor-profiles mentor))
+
+(define-read-only (get-mentorship-request (request-id uint))
+  (map-get? mentorship-requests request-id))
+
+(define-read-only (get-active-mentorship (mentorship-id uint))
+  (map-get? active-mentorships mentorship-id))
+
+(define-read-only (get-mentorship-session (mentorship-id uint) (session-number uint))
+  (map-get? mentorship-sessions {mentorship-id: mentorship-id, session-number: session-number}))
+
+(define-read-only (get-mentor-feedback (mentorship-id uint) (reviewer principal))
+  (map-get? mentor-feedback {mentorship-id: mentorship-id, reviewer: reviewer}))
+
+(define-read-only (get-mentorship-request-counter)
+  (var-get mentorship-request-counter))
+
+(define-read-only (get-mentorship-counter)
+  (var-get mentorship-counter))
+
+
+
+
+
+
+
+
+
+
+
